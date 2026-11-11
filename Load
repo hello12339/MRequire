@@ -80,22 +80,6 @@ _G.mrequire = (function()
                     return makeInstanceProxy(directChild)
                 end
 
-                local fw = game:GetService("ReplicatedStorage"):FindFirstChild("Framework")
-                if fw then
-                    local targetMod = fw:FindFirstChild(k, true)
-                    if targetMod then
-                        return makeInstanceProxy(targetMod)
-                    end
-                end
-
-                local rsLib = game:GetService("ReplicatedStorage"):FindFirstChild("Library")
-                if rsLib then
-                    local targetMod = rsLib:FindFirstChild(k, true)
-                    if targetMod then
-                        return makeInstanceProxy(targetMod)
-                    end
-                end
-
                 if typeof(inst[k]) == "function" then
                     return function(_, ...)
                         local args = {...}
