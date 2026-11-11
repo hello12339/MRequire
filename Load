@@ -1,0 +1,269 @@
+local mrequire = (function()
+    local moduleCache = {}
+    local scriptRegistry = {}
+    local loadingModules = {}
+
+    local function makeInstanceProxy(inst)
+        local proxy
+        proxy = setmetatable({}, {
+            __index = function(t, k)
+                if k == "LocalPlayer" then
+                    local players = game:GetService("Players")
+                    if players and players.LocalPlayer then
+                        return makeInstanceProxy(players.LocalPlayer)
+                    end
+                    return makeInstanceProxy(nil)
+                end
+
+                if k == "IsServer" or k == "IsClient" then
+                    return function() return true end
+                end
+
+                if k == "IsA" then
+                    return function(_, className)
+                        if inst then 
+                            local success, res = pcall(function() return inst:IsA(className) end)
+                            if success then return res end
+                        end
+                        return false
+                    end
+                end
+
+                if k == "GetChildren" or k == "GetDescendants" then
+                    return function()
+                        if inst then
+                            local success, children = pcall(function() return inst:GetChildren() end)
+                            if success and children then
+                                local wrapped = {}
+                                for _, child in ipairs(children) do
+                                    table.insert(wrapped, makeInstanceProxy(child))
+                                end
+                                return wrapped
+                            end
+                        end
+                        return {}
+                    end
+                end
+
+                if k == "FindFirstChild" or k == "WaitForChild" or k == "FindFirstChildWhichIsA" or k == "FindFirstChildOfClass" then
+                    return function(_, name, recursive)
+                        if inst then
+                            local success, found = pcall(function() return inst:FindFirstChild(name, recursive) end)
+                            if success and found then 
+                                return makeInstanceProxy(found) 
+                            end
+                        end
+                        local globalFind = game:GetService("ReplicatedStorage"):FindFirstChild(name, true)
+                        if globalFind then
+                            return makeInstanceProxy(globalFind)
+                        end
+                        return makeInstanceProxy(nil)
+                    end
+                end
+
+                if k == "GetService" then
+                    return function(_, serviceName)
+                        local success, service = pcall(function() return game:GetService(serviceName) end)
+                        if success and service then
+                            return makeInstanceProxy(service)
+                        end
+                        return makeInstanceProxy(nil)
+                    end
+                end
+
+                if not inst then
+                    return makeInstanceProxy(nil)
+                end
+                
+                local successChild, directChild = pcall(function() return inst:FindFirstChild(k) end)
+                if successChild and directChild then
+                    return makeInstanceProxy(directChild)
+                end
+
+                local fw = game:GetService("ReplicatedStorage"):FindFirstChild("Framework")
+                if fw then
+                    local targetMod = fw:FindFirstChild(k, true)
+                    if targetMod then
+                        return makeInstanceProxy(targetMod)
+                    end
+                end
+
+                local rsLib = game:GetService("ReplicatedStorage"):FindFirstChild("Library")
+                if rsLib then
+                    local targetMod = rsLib:FindFirstChild(k, true)
+                    if targetMod then
+                        return makeInstanceProxy(targetMod)
+                    end
+                end
+
+                if typeof(inst[k]) == "function" then
+                    return function(_, ...)
+                        local args = {...}
+                        local successCall, res1, res2, res3 = pcall(function()
+                            return inst[k](inst, unpack(args))
+                        end)
+                        if successCall then
+                            if typeof(res1) == "Instance" then
+                                return makeInstanceProxy(res1)
+                            end
+                            return res1, res2, res3
+                        end
+                        return makeInstanceProxy(nil)
+                    end
+                end
+
+                local successProp, val = pcall(function() return inst[k] end)
+                if successProp and val ~= nil then
+                    if typeof(val) == "Instance" then
+                        return makeInstanceProxy(val)
+                    end
+                    return val
+                end
+
+                return makeInstanceProxy(nil)
+            end,
+            __call = function()
+                return inst
+            end
+        })
+        return proxy
+    end
+
+    local gameProxy = makeInstanceProxy(game)
+
+    local function resolvePath(pathStr)
+        local current = gameProxy
+        for segment in pathStr:gmatch("[^%.]+") do
+            current = current[segment]
+            if not current then
+                return nil
+            end
+        end
+        return current
+    end
+
+    local function internalRequire(target)
+        if typeof(target) == "string" then
+            target = resolvePath(target)
+        end
+        if typeof(target) == "table" then
+            local realInst = target()
+            if typeof(realInst) == "Instance" then
+                if realInst:IsA("ModuleScript") then
+                    return mrequire(realInst)
+                else
+                    local mod = realInst:FindFirstChildWhichIsA("ModuleScript", true)
+                    if mod then
+                        return mrequire(mod)
+                    end
+                end
+            end
+            return target
+        elseif typeof(target) == "Instance" and target:IsA("ModuleScript") then
+            return mrequire(target)
+        elseif typeof(target) == "Instance" then
+            local mod = target:FindFirstChildWhichIsA("ModuleScript", true)
+            if mod then
+                return mrequire(mod)
+            end
+            return {}
+        else
+            return {}
+        end
+    end
+
+    local loader
+    loader = function(target)
+        if typeof(target) == "string" then
+            target = resolvePath(target)
+        end
+        
+        if typeof(target) == "table" then
+            local possibleInst = target()
+            if typeof(possibleInst) == "Instance" then
+                target = possibleInst
+            end
+        end
+
+        if typeof(target) ~= "Instance" or not target:IsA("ModuleScript") then
+            return {}
+        end
+
+        if moduleCache[target] then
+            return moduleCache[target]
+        end
+
+        if loadingModules[target] then
+            return {}
+        end
+        loadingModules[target] = true
+
+        local successSource, sourceCode = pcall(decompile, target)
+        if not successSource or not sourceCode or sourceCode == "" then
+            loadingModules[target] = nil
+            return {}
+        end
+
+        local id = tostring(math.random(100000000, 999999999))
+        scriptRegistry[id] = target
+        local token = "__mod_res_" .. tostring(math.random(100000, 999999))
+
+        _G["__get_script_" .. id] = nil
+        _G["__get_script_" .. id] = function()
+            return scriptRegistry[id]
+        end
+        _G.__mrequire_internal_require = internalRequire
+
+        local wrappedSource = string.format([[
+            local realScript = _G["__get_script_%s"]()
+            local script = ... 
+            local require = _G.__mrequire_internal_require
+            local game = gameProxy_Ref
+            local workspace = gameProxy_Ref.Workspace
+
+            local ok, res = pcall(function()
+                local moduleReturnValue = (function()
+                    %s
+                end)()
+                return moduleReturnValue
+            end)
+
+            _G["__get_script_%s"] = nil
+
+            if ok then
+                _G["%s"] = res
+            else
+                _G["%s_err"] = tostring(res)
+            end
+        ]], id, sourceCode, id, token, token)
+
+        getfenv(0).gameProxy_Ref = gameProxy
+
+        local chunk, loadErr = loadstring(wrappedSource, target.Name)
+        if not chunk then
+            _G["__get_script_" .. id] = nil
+            loadingModules[target] = nil
+            warn("Loadstring compile error in " .. target.Name .. ": " .. tostring(loadErr))
+            return {}
+        end
+
+        local proxy = makeInstanceProxy(target)
+        pcall(chunk, proxy)
+
+        scriptRegistry[id] = nil
+        loadingModules[target] = nil
+
+        local val = _G[token]
+        local result = val
+        _G[token] = nil
+
+        if result == nil then
+            result = {}
+        end
+
+        moduleCache[target] = result
+        return result
+    end
+
+    return loader
+end)()
