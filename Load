@@ -21,7 +21,7 @@ _G.mrequire = (function()
 
                 if k == "IsA" then
                     return function(_, className)
-                        if inst then 
+                        if inst then
                             local success, res = pcall(function() return inst:IsA(className) end)
                             if success then return res end
                         end
@@ -49,8 +49,8 @@ _G.mrequire = (function()
                     return function(_, name, recursive)
                         if inst then
                             local success, found = pcall(function() return inst:FindFirstChild(name, recursive) end)
-                            if success and found then 
-                                return makeInstanceProxy(found) 
+                            if success and found then
+                                return makeInstanceProxy(found)
                             end
                         end
                         local globalFind = game:GetService("ReplicatedStorage"):FindFirstChild(name, true)
@@ -74,7 +74,7 @@ _G.mrequire = (function()
                 if not inst then
                     return makeInstanceProxy(nil)
                 end
-                
+
                 local successChild, directChild = pcall(function() return inst:FindFirstChild(k) end)
                 if successChild and directChild then
                     return makeInstanceProxy(directChild)
@@ -115,6 +115,23 @@ _G.mrequire = (function()
 
     local gameProxy = makeInstanceProxy(game)
 
+    -- Remove common Luau-only type syntax that Matcha's loader cannot parse.
+    -- This deliberately leaves ::label:: goto labels unchanged.
+    local function normalizeLuauSource(source)
+        source = source:gsub("^%s*export%s+type%s+[%w_]+%s*=[^\n]*\n", "")
+        source = source:gsub("^%s*type%s+[%w_]+%s*=[^\n]*\n", "")
+        source = source:gsub("\n%s*export%s+type%s+[%w_]+%s*=[^\n]*", "")
+        source = source:gsub("\n%s*type%s+[%w_]+%s*=[^\n]*", "")
+
+        source = source:gsub("(local%s+[%a_][%w_]*)%s*:%s*[%w_%.]+%s*=", "%1 =")
+        source = source:gsub("([,(]%s*[%a_][%w_]*)%s*:%s*[%w_%.]+", "%1")
+        source = source:gsub("%)%s*:%s*[%w_%.]+(%s*\n)", ")%1")
+
+        source = source:gsub("([%w_]+)%s*::%s*[%w_%.]+", "%1")
+        source = source:gsub("([%)%]%}])%s*::%s*[%w_%.]+", "%1")
+        return source
+    end
+
     local function resolvePath(pathStr)
         local current = gameProxy
         for segment in pathStr:gmatch("[^%.]+") do
@@ -130,6 +147,7 @@ _G.mrequire = (function()
         if typeof(target) == "string" then
             target = resolvePath(target)
         end
+
         if typeof(target) == "table" then
             local realInst = target()
             if typeof(realInst) == "Instance" then
@@ -161,7 +179,7 @@ _G.mrequire = (function()
         if typeof(target) == "string" then
             target = resolvePath(target)
         end
-        
+
         if typeof(target) == "table" then
             local possibleInst = target()
             if typeof(possibleInst) == "Instance" then
@@ -188,6 +206,8 @@ _G.mrequire = (function()
             return {}
         end
 
+        sourceCode = normalizeLuauSource(sourceCode)
+
         local id = tostring(math.random(100000000, 999999999))
         scriptRegistry[id] = target
         local token = "__mod_res_" .. tostring(math.random(100000, 999999))
@@ -200,7 +220,7 @@ _G.mrequire = (function()
 
         local wrappedSource = string.format([[
             local realScript = _G["__get_script_%s"]()
-            local script = ... 
+            local script = ...
             local require = _G.__mrequire_internal_require
             local game = gameProxy_Ref
             local workspace = gameProxy_Ref.Workspace
