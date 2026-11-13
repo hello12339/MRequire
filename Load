@@ -21,7 +21,7 @@ _G.mrequire = (function()
 
                 if k == "IsA" then
                     return function(_, className)
-                        if inst then
+                        if inst then 
                             local success, res = pcall(function() return inst:IsA(className) end)
                             if success then return res end
                         end
@@ -49,8 +49,8 @@ _G.mrequire = (function()
                     return function(_, name, recursive)
                         if inst then
                             local success, found = pcall(function() return inst:FindFirstChild(name, recursive) end)
-                            if success and found then
-                                return makeInstanceProxy(found)
+                            if success and found then 
+                                return makeInstanceProxy(found) 
                             end
                         end
                         local globalFind = game:GetService("ReplicatedStorage"):FindFirstChild(name, true)
@@ -74,15 +74,13 @@ _G.mrequire = (function()
                 if not inst then
                     return makeInstanceProxy(nil)
                 end
-
+                
                 local successChild, directChild = pcall(function() return inst:FindFirstChild(k) end)
                 if successChild and directChild then
                     return makeInstanceProxy(directChild)
                 end
 
-                local successProp, val = pcall(function() return inst[k] end)
-
-                if successProp and typeof(val) == "function" then
+                if typeof(inst[k]) == "function" then
                     return function(_, ...)
                         local args = {...}
                         local successCall, res1, res2, res3 = pcall(function()
@@ -98,6 +96,7 @@ _G.mrequire = (function()
                     end
                 end
 
+                local successProp, val = pcall(function() return inst[k] end)
                 if successProp and val ~= nil then
                     if typeof(val) == "Instance" then
                         return makeInstanceProxy(val)
@@ -116,291 +115,6 @@ _G.mrequire = (function()
 
     local gameProxy = makeInstanceProxy(game)
 
-    ---------------------------------------------------------------------
-    -- Luau -> Lua source normalizer (scanner based)
-    -- Strips: `expr :: Type`, `type X = ...`, `export type X = ...`,
-    -- function param/return annotations, `local x: T` annotations.
-    -- Leaves strings, comments and ::label:: untouched.
-    ---------------------------------------------------------------------
-    local function normalizeLuauSource(source)
-        local n = #source
-        local out = {}
-        local last = 1
-
-        local function cut(a, b)
-            if a > last then
-                table.insert(out, source:sub(last, a - 1))
-            end
-            if b > last then last = b end
-        end
-
-        local function skipWs(p)
-            while true do
-                local c = source:sub(p, p)
-                if c == " " or c == "\t" then p = p + 1 else break end
-            end
-            return p
-        end
-
-        local function skipAnyWs(p)
-            while true do
-                local c = source:sub(p, p)
-                if c == " " or c == "\t" or c == "\n" or c == "\r" then p = p + 1 else break end
-            end
-            return p
-        end
-
-        local function skipString(p)
-            local q = source:sub(p, p)
-            local j = p + 1
-            while j <= n do
-                local c = source:sub(j, j)
-                if c == "\\" then
-                    j = j + 2
-                elseif c == q then
-                    return j + 1
-                else
-                    j = j + 1
-                end
-            end
-            return n + 1
-        end
-
-        local function longBracketEnd(p)
-            local eq = source:match("^%[(=*)%[", p)
-            if not eq then return nil end
-            local _, e = source:find("]" .. eq .. "]", p + #eq + 2, true)
-            return (e or n) + 1
-        end
-
-        -- returns index after the matching close, or nil if unbalanced
-        local function skipBalanced(p, open, close)
-            local depth = 0
-            local j = p
-            while j <= n do
-                local c = source:sub(j, j)
-                if c == '"' or c == "'" or c == "`" then
-                    j = skipString(j)
-                else
-                    if c == "-" and source:sub(j + 1, j + 1) == ">" then
-                        j = j + 2
-                    else
-                        if c == open then
-                            depth = depth + 1
-                        elseif c == close then
-                            depth = depth - 1
-                            if depth == 0 then return j + 1 end
-                        end
-                        j = j + 1
-                    end
-                end
-            end
-            return nil
-        end
-
-        local skipType
-        skipType = function(p)
-            p = skipWs(p)
-            local c = source:sub(p, p)
-            if c == "(" then
-                p = skipBalanced(p, "(", ")") or (p + 1)
-            elseif c == "{" then
-                p = skipBalanced(p, "{", "}") or (p + 1)
-            elseif c == '"' or c == "'" then
-                p = skipString(p)
-            else
-                local word = source:match("^[%a_][%w_%.]*", p)
-                if not word then return p end
-                p = p + #word
-                if source:sub(p, p) == "<" then
-                    p = skipBalanced(p, "<", ">") or p
-                end
-                if word == "typeof" and source:sub(p, p) == "(" then
-                    p = skipBalanced(p, "(", ")") or p
-                end
-            end
-
-            while true do
-                if source:sub(p, p) == "?" then
-                    p = p + 1
-                else
-                    local p2 = skipAnyWs(p)
-                    local c3 = source:sub(p2, p2)
-                    if c3 == "|" or c3 == "&" then
-                        p = skipType(p2 + 1)
-                    elseif source:sub(p2, p2 + 1) == "->" then
-                        p = skipType(p2 + 2)
-                    else
-                        break
-                    end
-                end
-            end
-            return p
-        end
-
-        local function isColon(p) -- single ':' (not '::')
-            return source:sub(p, p) == ":" and source:sub(p, p + 1) ~= "::"
-        end
-
-        local function prevCharRaw(p)
-            return p > 1 and source:sub(p - 1, p - 1) or ""
-        end
-
-        local function gapBefore(p) -- (prev significant char, whitespace between)
-            local j = p - 1
-            while j >= 1 and source:sub(j, j):match("%s") do j = j - 1 end
-            return source:sub(j, j), source:sub(j + 1, p - 1)
-        end
-
-        local function processFunction(pos) -- pos = right after 'function'
-            local p = skipAnyWs(pos)
-            local nm = source:match("^[%a_][%w_%.:]*", p)
-            if nm then p = p + #nm end
-            p = skipAnyWs(p)
-            if source:sub(p, p) == "<" then
-                local e = skipBalanced(p, "<", ">")
-                if e then cut(p, e); p = e end
-            end
-            p = skipAnyWs(p)
-            if source:sub(p, p) ~= "(" then return pos end
-            p = p + 1
-            while p <= n do
-                p = skipAnyWs(p)
-                local c = source:sub(p, p)
-                if c == ")" then
-                    p = p + 1
-                    break
-                elseif c == "," then
-                    p = p + 1
-                else
-                    local id = source:match("^[%a_][%w_]*", p)
-                    if not id and source:sub(p, p + 2) == "..." then id = "..." end
-                    if not id then break end
-                    p = p + #id
-                    local q = skipAnyWs(p)
-                    if isColon(q) then
-                        local e = skipType(q + 1)
-                        cut(p, e)
-                        p = e
-                    end
-                end
-            end
-            local q = skipWs(p)
-            if isColon(q) then
-                local e = skipType(q + 1)
-                cut(p, e)
-                p = e
-            end
-            return p
-        end
-
-        local function processLocal(pos) -- pos = right after 'local'
-            local p = pos
-            while true do
-                p = skipWs(p)
-                local id = source:match("^[%a_][%w_]*", p)
-                if not id or id == "function" then return p end
-                p = p + #id
-                local q = skipWs(p)
-                if isColon(q) then
-                    local e = skipType(q + 1)
-                    cut(p, e)
-                    p = e
-                end
-                q = skipWs(p)
-                if source:sub(q, q) == "," then
-                    p = q + 1
-                else
-                    return p
-                end
-            end
-        end
-
-        local i = 1
-        while i <= n do
-            local c = source:sub(i, i)
-            local c2 = source:sub(i, i + 1)
-
-            if c2 == "--" then
-                local e = longBracketEnd(i + 2)
-                if e then
-                    i = e
-                else
-                    local nl = source:find("\n", i, true)
-                    i = nl or (n + 1)
-                end
-
-            elseif c == '"' or c == "'" or c == "`" then
-                i = skipString(i)
-
-            elseif c == "[" and longBracketEnd(i) then
-                i = longBracketEnd(i)
-
-            elseif c2 == "::" then
-                local label = source:match("^::%s*[%a_][%w_]*%s*::", i)
-                local prev, gap = gapBefore(i)
-                if label and (gap:find("\n", 1, true) or prev == ";" or prev == "") then
-                    i = i + #label -- real goto label, keep
-                else
-                    local e = skipType(i + 2)
-                    cut(i, e)
-                    i = e
-                end
-
-            elseif c:match("[%a_]") then
-                local word = source:match("^[%a_][%w_]*", i)
-                local before = prevCharRaw(i)
-                local plain = (before ~= "." and before ~= ":")
-
-                if word == "function" and plain then
-                    i = processFunction(i + 8)
-
-                elseif word == "local" and plain then
-                    i = processLocal(i + 5)
-
-                elseif (word == "type" or word == "export") and plain then
-                    local m
-                    if word == "export" then
-                        m = source:match("^export%s+type%s+[%a_][%w_]*", i)
-                    else
-                        m = source:match("^type%s+[%a_][%w_]*", i)
-                    end
-                    if m and source:match("^%s*[=<]", i + #m) then
-                        local p = i + #m
-                        if source:sub(p, p) == "<" then
-                            p = skipBalanced(p, "<", ">") or p
-                        end
-                        p = skipAnyWs(p)
-                        if source:sub(p, p) == "=" and source:sub(p, p + 1) ~= "==" then
-                            p = skipAnyWs(p + 1)
-                            local e = skipType(p)
-                            cut(i, e)
-                            i = e
-                        else
-                            i = i + #word
-                        end
-                    else
-                        i = i + #word
-                    end
-                else
-                    i = i + #word
-                end
-
-            elseif c:match("%d") then
-                local num = source:match("^%d[%w_]*", i)
-                i = i + #num
-                local frac = source:match("^%.%d+[%w_]*", i)
-                if frac then i = i + #frac end
-
-            else
-                i = i + 1
-            end
-        end
-
-        table.insert(out, source:sub(last))
-        return table.concat(out)
-    end
-
     local function resolvePath(pathStr)
         local current = gameProxy
         for segment in pathStr:gmatch("[^%.]+") do
@@ -416,7 +130,6 @@ _G.mrequire = (function()
         if typeof(target) == "string" then
             target = resolvePath(target)
         end
-
         if typeof(target) == "table" then
             local realInst = target()
             if typeof(realInst) == "Instance" then
@@ -448,7 +161,7 @@ _G.mrequire = (function()
         if typeof(target) == "string" then
             target = resolvePath(target)
         end
-
+        
         if typeof(target) == "table" then
             local possibleInst = target()
             if typeof(possibleInst) == "Instance" then
@@ -475,8 +188,6 @@ _G.mrequire = (function()
             return {}
         end
 
-        sourceCode = normalizeLuauSource(sourceCode)
-
         local id = tostring(math.random(100000000, 999999999))
         scriptRegistry[id] = target
         local token = "__mod_res_" .. tostring(math.random(100000, 999999))
@@ -489,7 +200,7 @@ _G.mrequire = (function()
 
         local wrappedSource = string.format([[
             local realScript = _G["__get_script_%s"]()
-            local script = ...
+            local script = ... 
             local require = _G.__mrequire_internal_require
             local game = gameProxy_Ref
             local workspace = gameProxy_Ref.Workspace
@@ -526,13 +237,8 @@ _G.mrequire = (function()
         scriptRegistry[id] = nil
         loadingModules[target] = nil
 
-        local errMsg = _G[token .. "_err"]
-        if errMsg then
-            warn("Module runtime error in " .. target.Name .. ": " .. errMsg)
-            _G[token .. "_err"] = nil
-        end
-
-        local result = _G[token]
+        local val = _G[token]
+        local result = val
         _G[token] = nil
 
         if result == nil then
